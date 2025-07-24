@@ -3,6 +3,7 @@ from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
 from transformers import pipeline, T5ForConditionalGeneration, T5Tokenizer
+import os
 
 app = Flask(__name__)
 CORS(app)
@@ -70,4 +71,5 @@ def home():
     return "Combined AI backend is running."
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    port = int(os.environ.get("PORT", 8080))  # Use Render's PORT env or fallback 8080
+    app.run(host="0.0.0.0", port=port)
