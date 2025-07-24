@@ -66,6 +66,10 @@ def ask():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/status")
+def status():
+    return jsonify({"status": "online"})
+
 @app.route("/")
 def home():
     return "Combined AI backend is running."
