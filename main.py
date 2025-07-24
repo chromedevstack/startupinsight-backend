@@ -1,171 +1,173 @@
+import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import requests
-from bs4 import BeautifulSoup
-from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline, AutoModelForQuestionAnswering
 import torch
-import os
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app)
+CORS(app) # Enable CORS for all routes
 
-# Load models only once
-print("Loading AI models...")
+# Global variables for models and their status
+qa_pipeline = None
+generator_pipeline = None
+qa_model_status = "unloaded"
+gen_model_status = "unloaded"
 
-# --- For Question-Answering ---
-# Using a much smaller BERT-Tiny model fine-tuned for SQuAD
-# Model size: ~24.34 MB (compared to much larger defaults)
-qa_model_name = "mrm8488/bert-tiny-5-finetuned-squadv2"
-qa_pipeline = None # Initialize to None in case of loading failure
-try:
-    # Explicitly set device to 'cpu' for free tier deployments which are typically CPU-only
-    qa_pipeline = pipeline("question-answering", model=qa_model_name, device='cpu')
-    print(f"Question Answering model '{qa_model_name}' loaded successfully.")
-except Exception as e:
-    print(f"Error loading QA model '{qa_model_name}': {e}")
-    print("Question Answering functionality will be unavailable.")
+# Determine device (CPU for free tiers)
+# Using "cpu" explicitly as Render's free tier typically does not offer GPUs
+device = "cpu"
+print(f"Device set to use {device}")
 
-# --- For Text Generation ---
-# Using an extremely tiny LLM for generation (~10 Million parameters)
-gen_model_name = "arnir0/Tiny-LLM"
-gen_tokenizer = None
-gen_model = None
-try:
-    # Explicitly set device to 'cpu'
-    gen_tokenizer = AutoTokenizer.from_pretrained(gen_model_name)
-    gen_model = AutoModelForCausalLM.from_pretrained(gen_model_name).to('cpu')
-    # Ensure pad_token and eos_token are set if not already present, crucial for generation
-    if gen_tokenizer.pad_token is None:
-        gen_tokenizer.pad_token = gen_tokenizer.eos_token # Or a specific pad token if available
-    print(f"Text Generation model '{gen_model_name}' loaded successfully.")
-except Exception as e:
-    print(f"Error loading Generation model '{gen_model_name}': {e}")
-    print("Text Generation functionality will be unavailable.")
+# Function to load AI models
+def load_ai_models():
+    global qa_pipeline, generator_pipeline, qa_model_status, gen_model_status
 
-print("All AI models loading attempts complete.")
+    print("Loading AI models...")
 
-# Scrape text from a URL
-def scrape_text_from_url(url):
+    # --- Load Question Answering Model ---
+    qa_model_name = "mrm8488/bert-tiny-5-finetuned-squadv2"
     try:
-        resp = requests.get(url, timeout=5)
-        resp.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        
-        # Prioritize content within common article/main tags
-        main_content = soup.find(['article', 'main', 'body']) 
-        if main_content:
-            text = ' '.join(p.get_text() for p in main_content.find_all('p'))
-            if not text: # If no <p> tags in main content, try other block elements
-                text = ' '.join(main_content.get_text(separator=' ', strip=True).split())
-        else: # Fallback to body if no specific content tags found
-            text = ' '.join(p.get_text() for p in soup.find_all('p'))
-            if not text:
-                text = ' '.join(soup.get_text(separator=' ', strip=True).split())
+        # Load tokenizer and model
+        qa_tokenizer = AutoTokenizer.from_pretrained(qa_model_name)
+        qa_model = AutoModelForQuestionAnswering.from_pretrained(qa_model_name)
 
-        return text.strip()
-    except requests.exceptions.RequestException as req_e:
-        print(f"HTTP/Network error during scraping: {req_e}")
-        return None
+        # Create question-answering pipeline
+        qa_pipeline = pipeline("question-answering", model=qa_model, tokenizer=qa_tokenizer, device=device)
+        print(f"Question Answering model '{qa_model_name}' loaded successfully.")
+        qa_model_status = "loaded"
     except Exception as e:
-        print(f"General scraping error: {e}")
-        return None
+        print(f"Error loading Question Answering model '{qa_model_name}': {e}")
+        qa_model_status = "failed"
+        # Optional: Log full traceback for debugging
+        import traceback
+        traceback.print_exc()
 
-# --- Routes ---
-@app.route("/")
+    # --- Load Generation Model ---
+    gen_model_name = "arnir0/Tiny-LLM"
+    try:
+        # Load tokenizer and model
+        gen_tokenizer = AutoTokenizer.from_pretrained(gen_model_name)
+        # Note: If memory issues persist, this is the line you'd modify for quantization (e.g., load_in_8bit=True)
+        gen_model = AutoModelForCausalLM.from_pretrained(gen_model_name)
+
+        # Create text-generation pipeline
+        generator_pipeline = pipeline("text-generation", model=gen_model, tokenizer=gen_tokenizer, device=device)
+        print(f"Generation model '{gen_model_name}' loaded successfully.")
+        gen_model_status = "loaded"
+    except Exception as e:
+        print(f"Error loading Generation model '{gen_model_name}': {e}")
+        gen_model_status = "failed"
+        print("Text Generation functionality will be unavailable.")
+        # Optional: Log full traceback for debugging
+        import traceback
+        traceback.print_exc()
+
+    print("All AI models loading attempts complete.")
+
+# Load models when the application starts
+# This will execute as soon as `python main.py` is run
+load_ai_models()
+
+# --- API Endpoints ---
+
+@app.route('/')
 def home():
-    return "StartupInsight AI Backend Running"
+    """Basic endpoint to confirm the server is running."""
+    return jsonify({"message": "Backend is online and ready.", "status": "online",
+                    "qa_model_status": qa_model_status,
+                    "gen_model_status": gen_model_status})
 
-@app.route("/status")
+@app.route('/status')
 def status():
-    # Check if models were loaded successfully
-    qa_status = "loaded" if qa_pipeline else "failed"
-    gen_status = "loaded" if gen_model and gen_tokenizer else "failed"
-    overall_status = "online" if qa_pipeline or (gen_model and gen_tokenizer) else "degraded (no models)"
+    """Endpoint to check the status of the backend and models."""
     return jsonify({
-        "status": overall_status,
-        "qa_model_status": qa_status,
-        "gen_model_status": gen_status
+        "status": "online" if qa_model_status == "loaded" and gen_model_status == "loaded" else "degraded",
+        "qa_model_status": qa_model_status,
+        "gen_model_status": gen_model_status
     })
 
-@app.route("/generate", methods=["POST"])
-def generate():
+@app.route('/ask', methods=['POST'])
+def ask_question():
+    """Endpoint for the Question Answering model."""
+    if qa_pipeline is None or qa_model_status == "failed":
+        return jsonify({"error": "Question Answering model not loaded.", "qa_model_status": qa_model_status}), 503
+
+    data = request.json
+    question = data.get('question')
+    context_url = data.get('url') # URL from frontend
+
+    if not question or not context_url:
+        return jsonify({"error": "Question and URL are required."}), 400
+
     try:
-        if not gen_model or not gen_tokenizer:
-            return jsonify({"error": "Text generation model not loaded. Please check backend status."}), 500
+        # Fetch context from URL (simplified, ideally more robust parsing)
+        # Note: This context fetching is basic. For production, consider a robust web scraping library or API.
+        import requests
+        from bs4 import BeautifulSoup
+        response = requests.get(context_url, timeout=10)
+        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+        soup = BeautifulSoup(response.text, 'html.parser')
 
-        data = request.get_json()
-        prompt = data.get("prompt", "").strip()
-        if not prompt:
-            return jsonify({"error": "No prompt provided"}), 400
-
-        input_ids = gen_tokenizer(prompt, return_tensors="pt").input_ids
-        # Ensure input tensor is on CPU
-        input_ids = input_ids.to('cpu')
-
-        # Adjust generation parameters for better results with tiny models
-        output_ids = gen_model.generate(
-            input_ids,
-            max_new_tokens=50, # Keep output short to save computation and memory
-            do_sample=True,    # Use sampling for more varied output
-            top_k=50,          # Limit to top K words
-            top_p=0.95,        # Use nucleus sampling
-            temperature=0.7,   # Control randomness
-            # Using pad_token_id for eos_token_id often helps stop generation cleanly
-            eos_token_id=gen_tokenizer.eos_token_id if gen_tokenizer.eos_token_id is not None else gen_tokenizer.pad_token_id,
-            pad_token_id=gen_tokenizer.pad_token_id if gen_tokenizer.pad_token_id is not None else gen_tokenizer.eos_token_id
-        )
-        output_text = gen_tokenizer.decode(output_ids[0], skip_special_tokens=True)
-
-        # Remove the input prompt from the output if it's an appended generation
-        if output_text.startswith(prompt):
-            output_text = output_text[len(prompt):].strip()
-
-        return jsonify({"output": output_text})
-    except Exception as e:
-        return jsonify({"error": f"Text generation failed: {str(e)}"}), 500
-
-@app.route("/ask", methods=["POST"])
-def ask():
-    try:
-        if not qa_pipeline:
-            return jsonify({"error": "Question answering model not loaded. Please check backend status."}), 500
-
-        data = request.get_json()
-        question = data.get("question", "").strip()
-        url = data.get("url", "").strip()
-
-        if not question or not url:
-            return jsonify({"error": "Both 'question' and 'url' fields are required."}), 400
-
-        context = scrape_text_from_url(url)
-        if not context:
-            return jsonify({"error": "Failed to scrape content from URL or no relevant text found."}), 500
+        # Extract text content, prioritizing common content tags
+        paragraphs = soup.find_all('p')
+        content_divs = soup.find_all('div', class_=lambda c: c and ('content' in c or 'main' in c))
         
-        # Limit context size for smaller models
-        # QA models typically have max sequence lengths (e.g., 512 tokens).
-        # Truncating context helps prevent errors and OOM for large inputs.
-        # This is a basic truncation, for production, consider more intelligent chunking.
-        max_context_length_tokens = 400 # A common safe max length for small BERT-like models
-        # A rough token estimate by splitting words; for true tokenization, use model's tokenizer.
-        # But this is a quick way to reduce input size.
-        words = context.split()
-        if len(words) > max_context_length_tokens:
-            context = ' '.join(words[:max_context_length_tokens])
-            print(f"Context truncated to approx. {max_context_length_tokens} words.")
+        context_text = ""
+        if paragraphs:
+            context_text = "\n".join([p.get_text() for p in paragraphs])
+        elif content_divs:
+            context_text = "\n".join([d.get_text() for d in content_divs])
+        else:
+            context_text = soup.get_text() # Fallback to all text
 
-        answer = qa_pipeline(question=question, context=context)
+        if len(context_text) > 5000: # Limit context size for smaller models
+            context_text = context_text[:5000]
 
-        return jsonify({
-            "question": question,
-            "answer": answer.get("answer", "No answer found."),
-            "score": answer.get("score", 0.0)
-        })
+        if not context_text.strip():
+            return jsonify({"error": "Could not extract sufficient text from the provided URL. The page might be empty, JavaScript-heavy, or blocked."}), 400
+
+
+        # Use QA pipeline
+        result = qa_pipeline(question=question, context=context_text)
+        return jsonify(result) # result contains 'answer', 'score', 'start', 'end'
+    except requests.exceptions.RequestException as e:
+        return jsonify({"error": f"Failed to access URL: {e}"}), 400
     except Exception as e:
-        return jsonify({"error": f"Question answering failed: {str(e)}"}), 500
+        return jsonify({"error": f"An error occurred during QA: {e}"}), 500
 
-# Run the app on Render's dynamic port
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    # In a production environment like Render, set debug=False
-    app.run(host="0.0.0.0", port=port, debug=False)
+@app.route('/generate', methods=['POST'])
+def generate_text():
+    """Endpoint for the Text Generation model."""
+    if generator_pipeline is None or gen_model_status == "failed":
+        return jsonify({"error": "Generation model not loaded.", "gen_model_status": gen_model_status}), 503
+
+    data = request.json
+    prompt = data.get('prompt')
+
+    if not prompt:
+        return jsonify({"error": "Prompt is required."}), 400
+
+    try:
+        # Use generation pipeline
+        # Max new tokens for a short, concise response
+        # Adjust based on desired output length and model capabilities
+        result = generator_pipeline(prompt, max_new_tokens=200, num_return_sequences=1)
+        # The result is a list of dictionaries, take the generated_text from the first one
+        generated_text = result[0]['generated_text']
+
+        # Post-process to remove the original prompt if the model echoes it
+        if generated_text.startswith(prompt):
+            generated_text = generated_text[len(prompt):].strip()
+
+        return jsonify({"output": generated_text})
+    except Exception as e:
+        return jsonify({"error": f"An error occurred during text generation: {e}"}), 500
+
+# --- Main execution block ---
+if __name__ == '__main__':
+    # Get the port from the environment variable provided by Render (e.g., 10000)
+    # Default to 5000 for local testing if PORT is not set
+    port = int(os.environ.get('PORT', 5000))
+    # Run the Flask app
+    app.run(host='0.0.0.0', port=port, debug=False)
