@@ -1,5 +1,6 @@
 flask
 flask-cors
+requests
+beautifulsoup4
 transformers
 torch
-# ... other dependencies
