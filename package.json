@@ -1,1 +1,11 @@
-
+{
+  "name": "investiq-backend",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node api/index.js"
+  },
+  "dependencies": {
+    "axios": "^1.5.0",
+    "dotenv": "^16.0.3"
+  }
+}
